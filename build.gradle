@@ -14,17 +14,24 @@
  * limitations under the License.
  ******************************************************************************/
 buildscript {
-	apply from: "gradle/dependencies.gradle"
+    apply from: "gradle/dependencies.gradle"
 
-	repositories {
-		mavenCentral()
-		gradlePluginPortal()
-	}
-	dependencies {
-		classpath "com.diffplug.spotless:spotless-plugin-gradle:${versions.spotless}"
-		classpath "com.badlogicgames.gdx:gdx-jnigen-gradle:2.5.2"
-		classpath 'org.jreleaser:jreleaser-gradle-plugin:1.18.0'
-	}
+    def thesisVersion = "1.2"
+
+    repositories {
+        mavenCentral()
+        gradlePluginPortal()
+        maven {
+            name = "MyLocalRepo"
+            url = uri("/home/samedov/coding/thesis/local-repo")
+        }
+    }
+    dependencies {
+        classpath "com.diffplug.spotless:spotless-plugin-gradle:${versions.spotless}"
+        classpath "com.badlogicgames.gdx:gdx-jnigen-gradle:2.5.2"
+        classpath 'org.jreleaser:jreleaser-gradle-plugin:1.18.0'
+        classpath "com.samedov:thesis:${thesisVersion}"
+    }
 }
 
 plugins {
@@ -32,7 +39,9 @@ plugins {
 }
 
 apply from: "gradle/dependencies.gradle"
-
+ext {
+    thesisVersion = "1.2"
+}
 ext {
 	isReleaseBuild = {
 		return project.hasProperty("RELEASE")
@@ -65,6 +74,10 @@ allprojects {
 			maven { url "https://oss.sonatype.org/content/repositories/snapshots/" }
 			maven { url "https://oss.sonatype.org/content/repositories/releases/" }
 			maven { url "https://central.sonatype.com/repository/maven-snapshots/" }
+            maven {
+                name = "MyLocalRepo"
+                url = uri("/home/samedov/coding/thesis/local-repo")
+            }
 		}
 	}
 
@@ -76,6 +89,18 @@ allprojects {
 		maven { url "https://oss.sonatype.org/content/repositories/snapshots/" }
 		maven { url "https://oss.sonatype.org/content/repositories/releases/" }
 		maven { url "https://central.sonatype.com/repository/maven-snapshots/" }
+        maven {
+            name = "MyLocalRepo"
+            url = uri("/home/samedov/coding/thesis/local-repo")
+        }
+	}
+
+	// Ensure a consistent Guava variant is used across all configurations,
+	// including the detached configuration used by runServerStaticAnalysis.
+	configurations.all {
+		resolutionStrategy {
+			force "com.google.guava:guava:33.5.0-jre"
+		}
 	}
 
 	tasks.withType(JavaCompile) {
@@ -210,6 +235,83 @@ tasks.register('fetchNatives', Copy) {
 	from zipTree("build/natives.zip")
 	into "."
 	doNotTrackState("Don't track state")
+}
+
+
+// Configuration used to resolve the Thesis static analyzer and its dependencies
+configurations {
+    thesisAnalyzer {
+        canBeConsumed = false
+        canBeResolved = true
+
+        // Align attributes with a typical Java runtimeClasspath so variant selection works
+        attributes {
+            attribute(Usage.USAGE_ATTRIBUTE, objects.named(Usage, Usage.JAVA_RUNTIME))
+            attribute(Category.CATEGORY_ATTRIBUTE, objects.named(Category, Category.LIBRARY))
+            attribute(Bundling.BUNDLING_ATTRIBUTE, objects.named(Bundling, Bundling.EXTERNAL))
+            attribute(TargetJvmEnvironment.TARGET_JVM_ENVIRONMENT_ATTRIBUTE,
+                      objects.named(TargetJvmEnvironment, TargetJvmEnvironment.STANDARD_JVM))
+        }
+    }
+}
+
+dependencies {
+    thesisAnalyzer "com.samedov:thesis:${thesisVersion}"
+    // Explicitly add Guava JRE artifact so Gradle doesn't need to infer variants
+    thesisAnalyzer "com.google.guava:guava:33.5.0-jre"
+    thesisAnalyzer "org.slf4j:slf4j-simple:2.0.9"
+}
+
+
+tasks.register('runServerStaticAnalysis', JavaExec) {
+    group = 'verification'
+    description = 'Runs @Prove static analysis on the :server module.'
+
+    // Use a dedicated configuration with proper attributes instead of a detached one
+    classpath = configurations.thesisAnalyzer
+
+    mainClass = 'com.samedov.StaticAnalyzerMain'
+
+    jvmArgs = ['-Xms8g', '-Xmx8g', '-XX:+UseG1GC',
+               '-XX:MaxGCPauseMillis=200',
+               '-XX:StartFlightRecording=filename=profile.jfr,duration=120s,settings=profile']
+
+    // Analyzer configuration
+    def rootDirValue = project.findProperty('dirToStart') ?: 'backends'
+    def parallelGlobalValue = project.findProperty('parallelGlobal') ?: 'false'
+    def parallelFileValue = project.findProperty('parallelFile') ?: 'false'
+
+    systemProperty 'parallelGlobal', parallelGlobalValue
+    systemProperty 'parallelFile', parallelFileValue
+    // Point to a specific directory with annotated files, not the entire server module
+    systemProperty 'dirToStart', rootDirValue
+
+
+    // Track execution time
+    def startTime
+    def availableProcessors = Runtime.getRuntime().availableProcessors()
+
+    doFirst {
+        startTime = System.currentTimeMillis()
+        println "=================================================================================="
+        println "Starting Static Analysis at: ${new Date()}"
+        println "Root directory for analysis: ${rootDirValue}"
+        println "Parallel Global: ${parallelGlobalValue}"
+        println "Parallel File: ${parallelFileValue}"
+        println "Available Processors: ${availableProcessors}"
+        println "=================================================================================="
+    }
+
+    doLast {
+        def endTime = System.currentTimeMillis()
+        def durationMs = endTime - startTime
+        def durationSeconds = durationMs / 1000.0
+        def durationMinutes = durationSeconds / 60.0
+        println "=================================================================================="
+        println "Static Analysis completed at: ${new Date()}"
+        println "Total execution time: ${durationMs} ms (${String.format('%.2f', durationSeconds)} seconds / ${String.format('%.2f', durationMinutes)} minutes)"
+        println "=================================================================================="
+    }
 }
 
 apply from: rootProject.file('publish.gradle')
